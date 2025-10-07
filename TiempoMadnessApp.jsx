@@ -188,6 +188,11 @@ export default function TiempoMadnessApp() {
   const [sentence, setSentence] = useState("");
   const [result, setResult] = useState(null);
   const [history, setHistory] = useState([]);
+  const [scoringMode, setScoringMode] = useState("cloud"); // "cloud", "ollama", or "offline"
+  const [ollamaUrl, setOllamaUrl] = useState("http://localhost:11434");
+  const [ollamaModel, setOllamaModel] = useState("llama3");
+  const [apiError, setApiError] = useState(null);
+  const [isScoring, setIsScoring] = useState(false);
 
   const newDraw = () => {
     const d = generateDraw({difficulty});
@@ -196,10 +201,173 @@ export default function TiempoMadnessApp() {
     setResult(null);
   };
 
-  const doScore = () => {
-    const r = scoreSentence(sentence, draw);
-    setResult(r);
-    setHistory([{ts: new Date().toISOString(), draw, sentence, r}, ...history].slice(0,50));
+  const scoreWithCloudAI = async (sentence, draw) => {
+    // Call our Vercel serverless function instead of OpenAI directly
+    const response = await fetch('/api/score', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        sentence,
+        draw
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `API request failed with status ${response.status}`);
+    }
+
+    const parsed = await response.json();
+
+    // Format the feedback with score breakdown
+    const breakdown = [
+      `Conjugation accuracy: ${parsed.conjugationScore}/4`,
+      `Tense-time coherence: ${parsed.tenseTimeScore}/3`,
+      `Special condition: ${parsed.specialConditionScore}/2`,
+      `Naturalness: ${parsed.naturalnessScore}/1`
+    ];
+
+    return {
+      totalScore: parsed.totalScore,
+      breakdown,
+      explanation: parsed.explanation,
+      correctedVersion: parsed.correctedVersion
+    };
+  };
+
+  const scoreWithOllama = async (sentence, draw) => {
+    const prompt = `You are a Spanish grammar judge. Evaluate the player sentence strictly for the given draw.
+
+DRAW:
+Subject: ${draw.subject}
+Verb (infinitive): ${draw.verb}
+Tense: ${draw.tense}
+Time cue: ${draw.timeCue}
+Special: ${draw.special}
+
+TASK:
+1) Score 0–10 on: conjugation accuracy (0–4), tense-time coherence (0–3), special condition (0–2), naturalness (0–1).
+2) Provide a one-line corrected version (if needed).
+3) Briefly explain the key error(s) in English.
+
+PLAYER SENTENCE:
+${sentence}
+
+Provide a JSON response with this exact structure:
+{
+  "totalScore": <number 0-10>,
+  "conjugationScore": <number 0-4>,
+  "tenseTimeScore": <number 0-3>,
+  "specialConditionScore": <number 0-2>,
+  "naturalnessScore": <number 0-1>,
+  "correctedVersion": "<corrected sentence or 'Perfect!' if correct>",
+  "explanation": "<brief explanation of key errors or strengths>"
+}`;
+
+    const response = await fetch(`${ollamaUrl}/api/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: ollamaModel,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are an expert Spanish language teacher. Always respond with valid JSON only.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        stream: false,
+        options: {
+          temperature: 0.3,
+          num_predict: 500
+        }
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ollama request failed with status ${response.status}. Is Ollama running?`);
+    }
+
+    const data = await response.json();
+    const content = data.message.content;
+
+    // Parse the JSON response
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('Invalid response format from Ollama');
+    }
+
+    const parsed = JSON.parse(jsonMatch[0]);
+
+    // Format the feedback with score breakdown
+    const breakdown = [
+      `Conjugation accuracy: ${parsed.conjugationScore}/4`,
+      `Tense-time coherence: ${parsed.tenseTimeScore}/3`,
+      `Special condition: ${parsed.specialConditionScore}/2`,
+      `Naturalness: ${parsed.naturalnessScore}/1`
+    ];
+
+    return {
+      totalScore: parsed.totalScore,
+      breakdown,
+      explanation: parsed.explanation,
+      correctedVersion: parsed.correctedVersion
+    };
+  };
+
+  const doScore = async () => {
+    setApiError(null);
+    setIsScoring(true);
+
+    try {
+      if (scoringMode === 'cloud') {
+        // Cloud AI mode: use Vercel serverless function
+        const aiResult = await scoreWithCloudAI(sentence, draw);
+        const r = {
+          score: aiResult.totalScore,
+          max: 10,
+          notes: [...aiResult.breakdown, '', aiResult.explanation],
+          corrected: aiResult.correctedVersion,
+          source: 'cloud'
+        };
+        setResult(r);
+        setHistory([{ts: new Date().toISOString(), draw, sentence, r}, ...history].slice(0,50));
+      } else if (scoringMode === 'ollama') {
+        // Local Ollama mode
+        const aiResult = await scoreWithOllama(sentence, draw);
+        const r = {
+          score: aiResult.totalScore,
+          max: 10,
+          notes: [...aiResult.breakdown, '', aiResult.explanation],
+          corrected: aiResult.correctedVersion,
+          source: 'ollama'
+        };
+        setResult(r);
+        setHistory([{ts: new Date().toISOString(), draw, sentence, r}, ...history].slice(0,50));
+      } else {
+        // Offline mode: use local heuristic scoring
+        const r = scoreSentence(sentence, draw);
+        setResult(r);
+        setHistory([{ts: new Date().toISOString(), draw, sentence, r}, ...history].slice(0,50));
+      }
+    } catch (error) {
+      console.error('AI scoring error:', error);
+      setApiError(error.message);
+
+      // Fall back to local scoring
+      const r = scoreSentence(sentence, draw);
+      setResult(r);
+      setHistory([{ts: new Date().toISOString(), draw, sentence, r}, ...history].slice(0,50));
+    } finally {
+      setIsScoring(false);
+    }
   };
 
   const copyPrompt = async () => {
@@ -211,17 +379,78 @@ export default function TiempoMadnessApp() {
   return (
     <div className="min-h-screen p-6 md:p-10 bg-slate-50 text-slate-900">
       <div className="max-w-4xl mx-auto space-y-6">
-        <header className="flex items-center justify-between">
-          <h1 className="text-2xl md:text-3xl font-semibold">Tiempo Tag Team — Judge Mode</h1>
-          <div className="flex items-center gap-2">
-            <label className="text-sm">Difficulty</label>
-            <select className="border rounded-lg px-2 py-1 bg-white" value={difficulty} onChange={e=>setDifficulty(e.target.value)}>
-              <option value="easy">Easy (no tricky specials)</option>
-              <option value="standard">Standard</option>
-              <option value="wild">Wild (anything goes)</option>
-            </select>
-            <button onClick={newDraw} className="ml-2 px-3 py-2 rounded-xl shadow bg-indigo-600 text-white hover:shadow-md">New Draw</button>
+        <header className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h1 className="text-2xl md:text-3xl font-semibold">Tiempo Tag Team — Judge Mode</h1>
+            <div className="flex items-center gap-2">
+              <label className="text-sm">Difficulty</label>
+              <select className="border rounded-lg px-2 py-1 bg-white" value={difficulty} onChange={e=>setDifficulty(e.target.value)}>
+                <option value="easy">Easy (no tricky specials)</option>
+                <option value="standard">Standard</option>
+                <option value="wild">Wild (anything goes)</option>
+              </select>
+              <button onClick={newDraw} className="ml-2 px-3 py-2 rounded-xl shadow bg-indigo-600 text-white hover:shadow-md">New Draw</button>
+            </div>
           </div>
+          
+          <div className="p-3 bg-white rounded-xl border space-y-3">
+            <div className="flex items-center gap-3">
+              <label className="text-sm font-medium">Scoring Mode:</label>
+              <select
+                className="flex-1 border rounded-lg px-3 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                value={scoringMode}
+                onChange={e => setScoringMode(e.target.value)}
+              >
+                <option value="cloud">☁️ Cloud AI (OpenAI via server)</option>
+                <option value="ollama">🏠 Local AI (Ollama)</option>
+                <option value="offline">📊 Offline (heuristic scoring)</option>
+              </select>
+            </div>
+
+            {scoringMode === 'ollama' && (
+              <div className="flex gap-3 pl-6 border-l-2 border-slate-200">
+                <div className="flex-1">
+                  <label className="text-xs text-slate-600">Ollama URL</label>
+                  <input
+                    type="text"
+                    placeholder="http://localhost:11434"
+                    value={ollamaUrl}
+                    onChange={e => setOllamaUrl(e.target.value)}
+                    className="w-full px-3 py-1.5 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                  />
+                </div>
+                <div className="flex-1">
+                  <label className="text-xs text-slate-600">Model</label>
+                  <input
+                    type="text"
+                    placeholder="llama3"
+                    value={ollamaModel}
+                    onChange={e => setOllamaModel(e.target.value)}
+                    className="w-full px-3 py-1.5 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                  />
+                </div>
+              </div>
+            )}
+
+            {scoringMode === 'cloud' && (
+              <div className="text-xs text-slate-600 pl-6">
+                Using server-side OpenAI API (no API key needed from you)
+              </div>
+            )}
+
+            {scoringMode === 'offline' && (
+              <div className="text-xs text-slate-600 pl-6">
+                Using local pattern-matching heuristics only
+              </div>
+            )}
+          </div>
+          
+          {apiError && (
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800">
+              <span className="font-medium">⚠️ AI Scoring Error:</span> {apiError}
+              <span className="block mt-1 text-xs">Falling back to local heuristic scoring.</span>
+            </div>
+          )}
         </header>
 
         <section className="grid md:grid-cols-2 gap-4">
@@ -244,16 +473,30 @@ export default function TiempoMadnessApp() {
               onChange={e=>setSentence(e.target.value)}
             />
             <div className="flex gap-2 mt-2">
-              <button onClick={doScore} className="px-3 py-2 rounded-xl shadow bg-emerald-600 text-white hover:shadow-md">Score</button>
+              <button
+                onClick={doScore}
+                disabled={isScoring}
+                className="px-3 py-2 rounded-xl shadow bg-emerald-600 text-white hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isScoring ? 'Scoring...' : 'Score'}
+              </button>
               <button onClick={copyPrompt} className="px-3 py-2 rounded-xl shadow bg-slate-800 text-white hover:shadow-md">Copy Judge Prompt</button>
             </div>
             {result && (
               <div className="mt-3 rounded-xl border bg-white p-3">
-                <p className="font-medium">Local score: {result.score} / {result.max}</p>
+                <p className="font-medium">
+                  {result.source === 'cloud' ? '☁️ Cloud AI Score' : result.source === 'ollama' ? '🏠 Ollama Score' : '📊 Local score'}: {result.score} / {result.max}
+                </p>
                 {result.notes.length>0 && (
                   <ul className="list-disc ml-5 mt-1 text-sm text-slate-700 space-y-1">
                     {result.notes.map((n,i)=>(<li key={i}>{n}</li>))}
                   </ul>
+                )}
+                {result.corrected && result.corrected !== 'Perfect!' && (
+                  <div className="mt-2 pt-2 border-t text-sm">
+                    <span className="font-medium text-slate-600">Suggested correction:</span>
+                    <p className="text-emerald-700 mt-1">{result.corrected}</p>
+                  </div>
                 )}
               </div>
             )}
