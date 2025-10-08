@@ -106,7 +106,26 @@ vercel
    - Add `OPENAI_API_KEY` with your OpenAI API key
    - Get a key from: https://platform.openai.com/api-keys
 
-4. **Redeploy** (or it will auto-deploy on next git push)
+4. **Redeploy** (or it will auto-deploy on next git push):
+```bash
+vercel --prod
+```
+
+### Useful Vercel Commands
+
+```bash
+# List all deployments and their status
+vercel ls
+
+# Get details about the latest deployment
+vercel inspect
+
+# View deployment logs
+vercel logs
+
+# Check specific deployment by URL
+vercel inspect <deployment-url>
+```
 
 ### Cost Estimate
 - **Vercel hosting**: Free tier (100GB bandwidth/month)
